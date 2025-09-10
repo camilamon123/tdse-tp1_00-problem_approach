@@ -1,0 +1,241 @@
+TP1 – Diagramas de Estado – Modelado
+
+TP1-00-02 – Requerimiento del Proyecto
+Descripción breve:
+Punto de acceso a una playa de estacionamiento con barrera. Se requiere autorizar/denegar el paso y señalizar el estado con un LED.
+Para el prototipo se modela con dispositivos binarios: sensores tipo pulsador/llave y un LED como actuador.
+
+Alcance del prototipo (sistema con 3 sensores y LED con 3 modos: OFF/BLINK/ON):
+- Sensores (escrutar):
+  a) Lazo de entrada: EV_Loop_ON / EV_Loop_OFF (vehículo presente/ausente antes de la barrera).
+  b) Botón: EV_BTN_ON / EV_BTN_OFF (habilita el inicio de apertura).
+  c) IR bajo barrera: EV_IR_EMPTY (zona libre bajo la barrera).
+- Actuador (actuar): LED con tres comportamientos:
+  • OFF (barrera abajo), • BLINK (barrera subiendo o bajando), • ON (barrera arriba).
+- System (procesar): coordina el ciclo completo de la barrera con temporización de subida, permanencia arriba y bajada,
+  y ordena al LED el modo correspondiente (OFF/BLINK/ON). El fin del BLINK lo decide el System cuando la barrera llega a destino.
+- Entorno de modelado: diagramas/tablas de estado para Sensor/System/Actuador (arquitectura “escrutar → procesar → actuar”).
+
+--------------------------------------------------------------------------------
+
+TP1-00-03 – Modelos a usar (escrutar → procesar → actuar)
+
+1) Modelo Sensor (escrutar)
+- Dispositivo: un pulsador (un solo botón) con antirrebote por temporización (tick).
+- Responsabilidad: detectar cambios ESTABLES (presionado/liberado) y publicar acciones consolidadas.
+- Interfaz hacia System: las acciones del Sensor se convierten en señales/eventos para el System.
+
+2) Modelo System (procesar)
+- Responsabilidad: consumir las señales de los 3 sensores y decidir el estado de la barrera:
+  Espera vehículo (lazo ON) → espera botón → subida (con tiempo) → arriba (espera zona libre con tiempo) → bajada (con tiempo) → abajo → cierre (lazo OFF).
+- Temporización: usa contadores para subida (`tick_barrier`), permanencia arriba (`tick_barrier_up`) y bajada (`tick_barrier_down`).
+- Interfaz hacia Actuador (órdenes de LED):
+  • `op_led_blink_start()` → LED en BLINK (cuando inicia subida/bajada),
+  • `op_led_on()`          → LED ON (cuando la barrera llega arriba),
+  • `op_led_off()`         → LED OFF (cuando la barrera llega abajo).
+
+3) Modelo Actuador (actuar)
+- Dispositivo: un LED con tres modos:
+  • OFF, • BLINK (parpadeo con `tick` y período `DEL_BLINK`), • ON.
+- Responsabilidad:
+  • OFF cuando la barrera está abajo (orden del System),
+  • BLINK mientras la barrera sube o baja (orden del System),
+  • ON cuando la barrera está arriba (orden del System).
+- Eventos que recibe desde el System: `EV_ACT_SET_OFF`, `EV_ACT_SET_BLINK`, `EV_ACT_SET_ON`, y `EV_ACT_T_TICK` (para coordinar el BLINK).
+
+--------------------------------------------------------------------------------
+
+TP1-00-04 – Eventos y Acciones del modelo Sensor (un solo botón) – Versión del equipo (ON/OFF)
+
+Convención de identificadores:
+- state  => ST_BTN_01_*
+- event  => EV_BTN_01_*
+- timer  => tick (contador de confirmación) + DEL_BTN_01_MAX (umbral)
+- action => op_btn_01_*              // acciones publicadas al System
+- signal => EV_SYS_*                 // mapeo a System (informativo)
+
+Estados del Sensor (referencia):
+- Estables:   ST_BTN_01_ON  (botón estable en “presionado”)
+              ST_BTN_01_OFF (botón estable en “liberado”)
+- Ventanas de confirmación (debounce):
+              ST_BTN_01_FALLING (intento ON→OFF)
+              ST_BTN_01_RISING  (intento OFF→ON)
+
+Eventos de entrada usados por la FSM:
+- EV_BTN_01_ON   // lectura cruda “ON”
+- EV_BTN_01_OFF  // lectura cruda “OFF”
+
+Regla de temporización (debounce):
+- Al detectar un intento de cambio, se inicializa tick := DEL_BTN_01_MAX.
+- Mientras tick > 0, la FSM permanece en la ventana (FALLING/RISING) y tick se decrementa.
+- Cuando tick == 0, si el evento coincide con el borde esperado, se confirma el cambio y se pasa al estado estable destino;
+  si no coincide, se aborta y se vuelve al estado estable de origen.
+
+Acciones publicadas por el Sensor (hacia System):
+- op_btn_01_down()  // se consolidó “presionado estable” (confirmación de subida a ON)
+- op_btn_01_up()    // se consolidó “liberado estable”   (confirmación de bajada a OFF)
+
+--------------------------------------------------------------------------------
+
+TP1-00-05 – Tabla de Estados y Excitaciones del Sensor (un solo botón)
+
+[Estado actual]  | [Evento]      | [Condición/Guardia]             | [Acción(es)]                 | [Próximo estado]
+
+— Transiciones desde estado estable ON —
+ST_BTN_01_ON      | EV_BTN_01_OFF | —                               | tick := DEL_BTN_01_MAX       | ST_BTN_01_FALLING
+ST_BTN_01_ON      | EV_BTN_01_ON  | —                               | —                            | ST_BTN_01_ON
+
+— Ventana de confirmación para borde descendente (ON→OFF) —
+ST_BTN_01_FALLING | EV_BTN_01_OFF | tick > 0                        | tick--                       | ST_BTN_01_FALLING
+ST_BTN_01_FALLING | EV_BTN_01_ON  | tick > 0                        | tick--                       | ST_BTN_01_FALLING
+ST_BTN_01_FALLING | EV_BTN_01_OFF | tick == 0                       | op_btn_01_up()               | ST_BTN_01_OFF
+ST_BTN_01_FALLING | EV_BTN_01_ON  | tick == 0                       | —                            | ST_BTN_01_ON
+
+— Transiciones desde estado estable OFF —
+ST_BTN_01_OFF     | EV_BTN_01_ON  | —                               | tick := DEL_BTN_01_MAX       | ST_BTN_01_RISING
+ST_BTN_01_OFF     | EV_BTN_01_OFF | —                               | —                            | ST_BTN_01_OFF
+
+— Ventana de confirmación para borde ascendente (OFF→ON) —
+ST_BTN_01_RISING  | EV_BTN_01_OFF | tick > 0                        | tick--                       | ST_BTN_01_RISING
+ST_BTN_01_RISING  | EV_BTN_01_ON  | tick > 0                        | tick--                       | ST_BTN_01_RISING
+ST_BTN_01_RISING  | EV_BTN_01_ON  | tick == 0                       | op_btn_01_down()             | ST_BTN_01_ON
+ST_BTN_01_RISING  | EV_BTN_01_OFF | tick == 0                       | —                            | ST_BTN_01_OFF
+--------------------------------------------------------------------------------
+
+TP1-00-06 – Eventos y Acciones del modelo System (3 sensores, tiempos y LED OFF/BLINK/ON)
+
+Contexto (sensores):
+- EV_Loop_ON / EV_Loop_OFF  → vehículo presente/ausente en lazo de entrada.
+- EV_BTN_ON / EV_BTN_OFF    → botón presionado/liberado.
+- EV_IR_EMPTY               → zona bajo la barrera libre.
+
+Convenciones del System:
+- state  => ST_Loop_OFF, ST_BTN_OFF, ST_Barrier_Rising, ST_Barrier_UP, ST_Barrier_Falling, ST_Barrier_DOWN
+- event  => EV_Loop_ON, EV_Loop_OFF, EV_BTN_ON, EV_BTN_OFF, EV_Barrier_OFF, EV_IR_EMPTY
+- timers => tick_barrier, tick_barrier_up, tick_barrier_down
+- consts => BARRIER_MAX (tiempo de subida/bajada), BARRIER_UP (tiempo de permanencia arriba)
+
+Acciones externas (hacia Actuador/LED) – mapeo a eventos del Actuator:
+- op_led_blink_start() → EV_ACT_SET_BLINK   // LED BLINK (subiendo/bajando)
+- op_led_on()          → EV_ACT_SET_ON      // LED ON  (barrera arriba)
+- op_led_off()         → EV_ACT_SET_OFF     // LED OFF (barrera abajo)
+
+Acciones internas (temporización):
+- tick_barrier := BARRIER_MAX         // armar tiempo de subida
+- tick_barrier_up := BARRIER_UP       // armar permanencia arriba
+- tick_barrier_down := BARRIER_MAX    // armar tiempo de bajada
+- tick_barrier-- / tick_barrier_up-- / tick_barrier_down--   // consumir tiempo
+
+Descripción de uso (flujo con LED controlado por el System):
+- EV_Loop_ON → ST_BTN_OFF (espera botón).
+- EV_BTN_ON (barrera quieta) → iniciar subida:
+  tick_barrier := BARRIER_MAX; op_led_blink_start() → ST_Barrier_Rising.
+- Subida: con EV_Barrier_OFF se consume tick_barrier--; al agotar (tick_barrier == 0):
+  tick_barrier_up := BARRIER_UP; op_led_on() → ST_Barrier_UP.
+- Arriba: con EV_IR_EMPTY se consume tick_barrier_up--; al agotar (tick_barrier_up == 0):
+  tick_barrier_down := BARRIER_MAX; op_led_blink_start() → ST_Barrier_Falling.
+- Bajada: con EV_Barrier_OFF se consume tick_barrier_down--; al agotar (tick_barrier_down == 0):
+  op_led_off() → ST_Barrier_DOWN.
+- EV_Loop_OFF → ST_Loop_OFF (ciclo cerrado).
+
+--------------------------------------------------------------------------------
+
+TP1-00-07 – Tabla de Estados y Excitaciones del System (3 sensores, tiempos y LED OFF/BLINK/ON)
+
+[Estado actual]     | [Evento]        | [Condición/Guardia]          | [Acción(es)]                                             | [Próximo estado]
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+— Arranque / Espera —
+ST_Loop_OFF         | EV_Loop_ON      | —                            | —                                                        | ST_BTN_OFF
+
+— Espera de botón con vehículo presente —
+ST_BTN_OFF          | EV_BTN_OFF      | —                            | —                                                        | ST_Loop_OFF
+ST_BTN_OFF          | EV_BTN_ON       | tick_barrier == 0            | tick_barrier := BARRIER_MAX; op_led_blink_start()        | ST_Barrier_Rising
+
+— Subida de barrera —
+ST_Barrier_Rising   | EV_Barrier_OFF  | tick_barrier > 0             | tick_barrier--                                           | ST_Barrier_Rising
+ST_Barrier_Rising   | EV_Barrier_OFF  | tick_barrier == 0            | tick_barrier_up := BARRIER_UP; op_led_on()               | ST_Barrier_UP
+
+— Barrera arriba (espera zona libre y permanencia arriba) —
+ST_Barrier_UP       | EV_IR_EMPTY     | tick_barrier_up > 0          | tick_barrier_up--                                        | ST_Barrier_UP
+ST_Barrier_UP       | EV_IR_EMPTY     | tick_barrier_up == 0         | tick_barrier_down := BARRIER_MAX; op_led_blink_start()   | ST_Barrier_Falling
+
+— Bajada de barrera —
+ST_Barrier_Falling  | EV_Barrier_OFF  | tick_barrier_down > 0        | tick_barrier_down--                                      | ST_Barrier_Falling
+ST_Barrier_Falling  | EV_Barrier_OFF  | tick_barrier_down == 0       | op_led_off()                                             | ST_Barrier_DOWN
+
+— Fin de ciclo / salida del loop —
+ST_Barrier_DOWN     | EV_Loop_OFF     | —                            | —                                                        | ST_Loop_OFF
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+
+TP1-00-08 – Eventos y Acciones del modelo actuador
+
+Contexto:
+El actuador recibe órdenes del System y controla un LED con tres modos:
+- OFF: barrera abajo
+- BLINK: barrera subiendo o bajando
+- ON: barrera arriba
+
+Convenciones:
+- state  => ST_LED_*           // ST_LED_OFF, ST_LED_BLINK, ST_LED_ON
+- event  => EV_ACT_*           // EV_ACT_SET_OFF, EV_ACT_SET_BLINK, EV_ACT_SET_ON, EV_ACT_T_TICK
+- action => op_led_*           // op_led_off_pin(), op_led_on_pin(), op_led_toggle_pin()
+- timer  => tick periódico + DEL_BLINK (período del parpadeo)
+
+Origen de los eventos (mapeo desde acciones del System):
+- op_led_off()         → EV_ACT_SET_OFF
+- op_led_blink_start() → EV_ACT_SET_BLINK
+- op_led_on()          → EV_ACT_SET_ON
+- (tick del sistema)   → EV_ACT_T_TICK
+
+EVENTOS entrantes:
+1) EV_ACT_SET_OFF      // fijar LED OFF (cuando System declara barrera abajo)
+2) EV_ACT_SET_BLINK    // poner LED en BLINK (al iniciar movimiento)
+3) EV_ACT_SET_ON       // fijar LED ON (cuando System declara barrera arriba)
+4) EV_ACT_T_TICK       // paso de tiempo para parpadeo
+
+ACCIONES (efecto físico):
+- op_led_off_pin()      // LOW
+- op_led_on_pin()       // HIGH
+- op_led_toggle_pin()   // alterna LOW↔HIGH
+
+Variables internas mínimas:
+- t           // contador del período de blink (0 hasta DEL_BLINK)
+- DEL_BLINK   // período del parpadeo (algún tiempo determinado)
+
+Regla de diseño:
+- El LED IGNORA su propio `t` para decidir ON/OFF. Es el System quien ordena salir de BLINK (SET_ON/SET_OFF) cuando la barrera llega a destino.
+
+--------------------------------------------------------------------------------
+
+TP1-00-09 – Tabla de Estados y Excitaciones del actuador
+
+Estados:
+- ST_LED_OFF
+- ST_LED_BLINK
+- ST_LED_ON
+
+Variables:
+- t, DEL_BLINK
+
+[Estado actual] | [Evento]          | [Condición/Guardia] | [Acción(es)]                        | [Próximo estado]
+-------------------------------------------------------------------------------------------------------------------
+ST_LED_OFF      | EV_ACT_SET_BLINK  | true                | t := DEL_BLINK; op_led_toggle_pin() | ST_LED_BLINK
+-------------------------------------------------------------------------------------------------------------------
+ST_LED_ON       | EV_ACT_SET_BLINK  | true                | t := DEL_BLINK; op_led_toggle_pin() | ST_LED_BLINK
+-------------------------------------------------------------------------------------------------------------------
+ST_LED_BLINK    | EV_ACT_T_TICK     | t > 0               | t := t - 1                          | ST_LED_BLINK
+ST_LED_BLINK    | EV_ACT_T_TICK     | t == 0              | op_led_toggle_pin(); t := DEL_BLINK | ST_LED_BLINK
+ST_LED_BLINK    | EV_ACT_SET_ON     | true                | op_led_on_pin()                     | ST_LED_ON
+ST_LED_BLINK    | EV_ACT_SET_OFF    | true                | op_led_off_pin()                    | ST_LED_OFF
+-------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
